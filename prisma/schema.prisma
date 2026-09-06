@@ -1,0 +1,373 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum UserStatus {
+  PENDING_VERIFICATION
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum VerificationStatus {
+  UNVERIFIED
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum UserRole {
+  BUYER
+  SELLER
+  DISPATCH
+  ADMIN
+}
+
+enum EscrowStatus {
+  PENDING          // order placed, awaiting payment
+  FUNDED           // buyer paid, held in escrow
+  SELLER_RELEASED  // seller's cut released on order confirmation
+  DELIVERED        // dispatch confirmed delivery
+  COMPLETED        // all legs released
+  DISPUTED
+  REFUNDING
+  REFUNDED
+}
+
+enum LedgerEntryType {
+  DEPOSIT
+  WITHDRAWAL
+  ESCROW_FUND            // buyer money drops into escrow
+  ESCROW_SELLER_PAYOUT   // release to seller on order confirmation
+  ESCROW_DISPATCH_PAYOUT // release to dispatch on delivery
+  ESCROW_PLATFORM_FEE    // Epla's fee margin recorded as revenue
+  ESCROW_REFUND
+  ADJUSTMENT
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  CONFIRMED
+  DISPATCHED
+  DELIVERED
+  COMPLETED
+  CANCELLED
+  DISPUTED
+}
+
+enum NotificationType {
+  ORDER_UPDATE
+  PAYMENT_UPDATE
+  ESCROW_UPDATE
+  SYSTEM
+  PROMOTION
+}
+
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED_BUYER
+  RESOLVED_SELLER
+  CLOSED
+}
+
+// ============================================================
+// USER & IDENTITY
+// ============================================================
+
+model User {
+  id                String              @id @default(cuid())
+  email             String?             @unique
+  phone             String?             @unique
+  passwordHash      String?
+  firstName         String
+  lastName          String
+  displayName       String?
+  avatarUrl         String?
+  status            UserStatus          @default(PENDING_VERIFICATION)
+  verification      VerificationStatus  @default(UNVERIFIED)
+  lastLoginAt       DateTime?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  roles             UserRoleAssignment[]
+  addresses         Address[]
+  shops             Shop[]
+  orders            Order[]
+  cart              Cart?
+  reviews           Review[]
+  notifications     Notification[]
+  supportTickets    SupportTicket[]
+  disputes          Dispute[]
+  paymentMethods    PaymentMethodAccount[]
+
+  wallet            Wallet?
+  ledgerEntries     LedgerEntry[]
+
+  escrowsAsBuyer    Escrow[]            @relation("EscrowBuyer")
+  escrowsAsSeller   Escrow[]            @relation("EscrowSeller")
+  escrowsAsDispatch Escrow[]            @relation("EscrowDispatch")
+}
+
+model UserRoleAssignment {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      UserRole
+  createdAt DateTime @default(now())
+
+  @@unique([userId, role])
+}
+
+model Address {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label      String?
+  line1      String
+  line2      String?
+  city       String
+  state      String
+  country    String   @default("Nigeria")
+  isDefault  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+}
+
+// ============================================================
+// MARKETPLACE
+// ============================================================
+
+model Shop {
+  id          String   @id @default(cuid())
+  ownerId     String
+  owner       User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  logoUrl     String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  products    Product[]
+  orders      Order[]
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  shopId      String
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  price       Decimal  @db.Decimal(14, 2)
+  stock       Int      @default(0)
+  imageUrl    String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  reviews     Review[]
+  orderItems  OrderItem[]
+  cartItems   CartItem[]
+}
+
+model Cart {
+  id        String     @id @default(cuid())
+  userId    String     @unique
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items     CartItem[]
+  updatedAt DateTime   @updatedAt
+}
+
+model CartItem {
+  id        String  @id @default(cuid())
+  cartId    String
+  cart      Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  quantity  Int     @default(1)
+
+  @@unique([cartId, productId])
+}
+
+model Review {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  rating    Int
+  comment   String?
+  createdAt DateTime @default(now())
+}
+
+// ============================================================
+// ORDERS
+// ============================================================
+
+model Order {
+  id           String       @id @default(cuid())
+  buyerId      String
+  buyer        User         @relation(fields: [buyerId], references: [id], onDelete: Restrict)
+  shopId       String
+  shop         Shop         @relation(fields: [shopId], references: [id], onDelete: Restrict)
+  status       OrderStatus  @default(PENDING_PAYMENT)
+
+  subtotal     Decimal      @db.Decimal(14, 2) // sum of product prices
+  displayedFee Decimal      @db.Decimal(14, 2) // fee shown to & paid by buyer
+  totalAmount  Decimal      @db.Decimal(14, 2) // subtotal + displayedFee
+
+  items        OrderItem[]
+  escrow       Escrow?
+  dispute      Dispute?
+
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+}
+
+model OrderItem {
+  id        String  @id @default(cuid())
+  orderId   String
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  quantity  Int
+  unitPrice Decimal @db.Decimal(14, 2) // price at time of purchase
+
+  @@unique([orderId, productId])
+}
+
+// ============================================================
+// WALLET, LEDGER & ESCROW (fintech core)
+// ============================================================
+
+model Wallet {
+  id            String        @id @default(cuid())
+  userId        String        @unique
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balance       Decimal       @default(0) @db.Decimal(14, 2)
+  currency      String        @default("NGN")
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  ledgerEntries LedgerEntry[]
+}
+
+model LedgerEntry {
+  id           String          @id @default(cuid())
+  userId       String
+  user         User            @relation(fields: [userId], references: [id], onDelete: Restrict)
+  walletId     String
+  wallet       Wallet          @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  type         LedgerEntryType
+  amount       Decimal         @db.Decimal(14, 2)
+  balanceAfter Decimal         @db.Decimal(14, 2)
+  reference    String          @unique // idempotency guard against webhook retries
+  escrowId     String?
+  escrow       Escrow?         @relation(fields: [escrowId], references: [id], onDelete: SetNull)
+  metadata     Json?
+  createdAt    DateTime        @default(now())
+
+  @@index([userId, createdAt])
+  @@index([escrowId])
+}
+
+// Fee logic (apply in application code, not the DB):
+//   FLAT_FEE = 150, THRESHOLD = 10000, RATE = 0.02
+//   displayedFee = subtotal <= THRESHOLD ? FLAT_FEE : round2(subtotal * RATE)
+//   paystackFeeActual = real Paystack cost: 1.5% + N100 on (subtotal + displayedFee),
+//                        waived if that amount <= N2500, capped at N2000
+//   platformFee = displayedFee - paystackFeeActual  (Epla's margin; can be checked for negatives on edge cases)
+//   totalAmount = subtotal + displayedFee  (what the buyer is charged)
+model Escrow {
+  id                String        @id @default(cuid())
+  orderId           String        @unique
+  order             Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  subtotalAmount    Decimal       @db.Decimal(14, 2) // vendor's product/service price
+  displayedFee      Decimal       @db.Decimal(14, 2) // fee shown to & paid by buyer (flat N150 or 2%)
+  paystackFeeActual Decimal       @db.Decimal(14, 2) // real Paystack cost (1.5% + N100, capped/waived)
+  platformFee       Decimal       @db.Decimal(14, 2) // displayedFee - paystackFeeActual = Epla's margin
+  totalAmount       Decimal       @db.Decimal(14, 2) // subtotalAmount + displayedFee = what buyer pays
+
+  sellerAmount      Decimal       @db.Decimal(14, 2) // paid out from subtotalAmount
+  dispatchAmount    Decimal       @db.Decimal(14, 2) // paid out from subtotalAmount
+
+  status            EscrowStatus  @default(PENDING)
+
+  buyerId           String
+  buyer             User          @relation("EscrowBuyer", fields: [buyerId], references: [id], onDelete: Restrict)
+  sellerId          String
+  seller            User          @relation("EscrowSeller", fields: [sellerId], references: [id], onDelete: Restrict)
+  dispatchId        String?
+  dispatch          User?         @relation("EscrowDispatch", fields: [dispatchId], references: [id], onDelete: SetNull)
+
+  paystackReference String?       @unique // Paystack transaction reference for webhook matching
+
+  fundedAt          DateTime?
+  sellerReleasedAt  DateTime?
+  deliveredAt       DateTime?
+  completedAt       DateTime?
+
+  ledgerEntries     LedgerEntry[]
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+}
+
+model PaymentMethodAccount {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider   String   // e.g. "paystack"
+  accountRef String   // provider's token/reference for this method
+  last4      String?
+  isDefault  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+}
+
+// ============================================================
+// SUPPORT & DISPUTES
+// ============================================================
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      NotificationType
+  title     String
+  body      String
+  isRead    Boolean          @default(false)
+  createdAt DateTime         @default(now())
+}
+
+model SupportTicket {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subject    String
+  message    String
+  isResolved Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model Dispute {
+  id         String        @id @default(cuid())
+  orderId    String        @unique
+  order      Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  raisedById String
+  raisedBy   User          @relation(fields: [raisedById], references: [id], onDelete: Cascade)
+  reason     String
+  status     DisputeStatus @default(OPEN)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+}
